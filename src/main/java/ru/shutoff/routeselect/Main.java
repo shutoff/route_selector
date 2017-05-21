@@ -6,6 +6,8 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.view.Window;
+import android.view.WindowManager;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -110,6 +112,22 @@ public class Main implements IXposedHookLoadPackage {
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         XposedBridge.log("Activity.onPause");
                         cg_foreground = false;
+                    }
+
+                });
+
+        findAndHookMethod("android.app.Activity", lpparam.classLoader, "onAttachedToWindow",
+                new XC_MethodHook() {
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        XposedBridge.log("Activity.onAttachedToWindow");
+                        Activity activity = (Activity) param.thisObject;
+                        Window window = activity.getWindow();
+                        window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                                + WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                                + WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                                + WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
                     }
 
                 });
