@@ -1,17 +1,25 @@
 package ru.shutoff.routeselect;
 
+import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.UserHandle;
+import android.provider.Telephony;
+import android.telephony.SubscriptionManager;
 import android.view.Window;
 import android.view.WindowManager;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
@@ -25,25 +33,27 @@ public class Main implements IXposedHookLoadPackage {
     static BroadcastReceiver br;
     static boolean cg_foreground;
 
-    public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
-        if (lpparam.packageName.equals("com.google.android.googlequicksearchbox")) {
-            findAndHookMethod("android.app.Activity", lpparam.classLoader, "startActivityForResult", "android.content.Intent", "int", "android.os.Bundle", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    Intent intent = (Intent) param.args[0];
-                    String intent_pkg = intent.getPackage();
-                    if ((intent_pkg != null) && intent_pkg.equals("com.google.android.apps.maps"))
-                        intent.setPackage(null);
-                    super.beforeHookedMethod(param);
-                }
-            });
-            return;
-        }
+    private SmsReceiver smsReceiver;
+    private SmsReceiver mmsReceiver;
 
+    private void handleSearch(final LoadPackageParam lpparam) throws Throwable {
+        if (!lpparam.packageName.equals("com.google.android.googlequicksearchbox"))
+            return;
+        findAndHookMethod("android.app.Activity", lpparam.classLoader, "startActivityForResult", "android.content.Intent", "int", "android.os.Bundle", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                Intent intent = (Intent) param.args[0];
+                String intent_pkg = intent.getPackage();
+                if ((intent_pkg != null) && intent_pkg.equals("com.google.android.apps.maps"))
+                    intent.setPackage(null);
+                super.beforeHookedMethod(param);
+            }
+        });
+    }
+
+    private void handleCG(final LoadPackageParam lpparam) throws Throwable {
         if (!lpparam.packageName.equals("cityguide.probki.net"))
             return;
-
-        XposedBridge.log("Load " + lpparam.packageName);
 
         findAndHookMethod("android.app.Activity", lpparam.classLoader, "onCreate", "android.os.Bundle",
                 new XC_MethodHook() {
@@ -131,6 +141,188 @@ public class Main implements IXposedHookLoadPackage {
                     }
 
                 });
+    }
+
+    private void updateDefaultSmsReceiver(Context context, ComponentName componentName, boolean isMms) {
+        SmsReceiver receiver = isMms ? mmsReceiver : smsReceiver;
+        if (receiver != null) {
+            if (receiver.getComponentName().equals(componentName)) {
+                return;
+            }
+            context.unregisterReceiver(receiver);
+
+            if (isMms) {
+                mmsReceiver = null;
+            } else {
+                smsReceiver = null;
+            }
+        }
+
+        if (componentName == null) {
+            return;
+        }
+
+        receiver = new SmsReceiver(componentName);
+        context.registerReceiver(receiver, new IntentFilter(isMms
+                ? Telephony.Sms.Intents.WAP_PUSH_RECEIVED_ACTION : Telephony.Sms.Intents.SMS_RECEIVED_ACTION));
+        if (isMms) {
+            mmsReceiver = receiver;
+        } else {
+            smsReceiver = receiver;
+        }
+    }
+
+    private class DispatchIntentHook extends XC_MethodHook {
+        private final int mReceiverIndex;
+
+        public DispatchIntentHook(int receiverIndex) {
+            mReceiverIndex = receiverIndex;
+        }
+
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+            try {
+                Intent intent = (Intent) param.args[0];
+                final String action = intent.getAction();
+
+                boolean isMms = false;
+                switch (action) {
+                    case Telephony.Sms.Intents.SMS_DELIVER_ACTION:
+                        intent.setAction(Telephony.Sms.Intents.SMS_RECEIVED_ACTION);
+                        break;
+                    case Telephony.Sms.Intents.WAP_PUSH_DELIVER_ACTION:
+                        isMms = true;
+                        intent.setAction(Telephony.Sms.Intents.WAP_PUSH_RECEIVED_ACTION);
+                        break;
+                    default:
+                        // not interesting
+                        return;
+                }
+
+                Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                updateDefaultSmsReceiver(context, intent.getComponent(), isMms);
+                intent.setComponent(null);
+
+                String perm = (String) param.args[1];
+                int appOp = ((Integer) param.args[2]);
+                BroadcastReceiver receiver = (BroadcastReceiver) param.args[mReceiverIndex];
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    final Bundle opts = (Bundle) param.args[3];
+                    UserHandle userHandle = (UserHandle) param.args[5];
+                    putPhoneIdAndSubIdExtra(param.thisObject, intent);
+                    if (isAllUser(userHandle))
+                        userHandle = (UserHandle) XposedHelpers.getStaticObjectField(UserHandle.class, "OWNER");
+                    callSendBroadcastAsUser(param.thisObject, context, intent, userHandle, perm, appOp, opts, receiver);
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    UserHandle userHandle = (UserHandle) param.args[4];
+                    putPhoneIdAndSubIdExtra(param.thisObject, intent);
+                    if (isAllUser(userHandle))
+                        userHandle = (UserHandle) XposedHelpers.getStaticObjectField(UserHandle.class, "OWNER");
+                    callSendBroadcastAsUser(param.thisObject, context, intent, userHandle, perm, appOp, receiver);
+                } else {
+                    callSendBroadcast(param.thisObject, context, intent, perm, appOp, receiver);
+                }
+                // skip original method
+                param.setResult(null);
+            } catch (Throwable e) {
+                XposedBridge.log(e);
+                throw e;
+            }
+        }
+    }
+
+    private static void putPhoneIdAndSubIdExtra(Object thisObject, Intent intent) {
+        /*
+        PhoneBase phone = (PhoneBase) XposedHelpers.getObjectField(thisObject, "mPhone");
+        XposedHelpers.callStaticMethod(SubscriptionManager.class, "putPhoneIdAndSubIdExtra",
+                intent, phone.getPhoneId());
+        */
+    }
+
+    private static void callSendBroadcastAsUser(Object thisObject, Context context, Intent intent,
+                                                UserHandle user, String perm, int appOp, Bundle opts,
+                                                BroadcastReceiver receiver) {
+        XposedHelpers.callMethod(context, "sendOrderedBroadcastAsUser", intent, user, perm,
+                appOp, opts, receiver, XposedHelpers.callMethod(thisObject, "getHandler"), Activity.RESULT_OK, null, null);
+    }
+
+    private static void callSendBroadcastAsUser(Object thisObject, Context context, Intent intent,
+                                                UserHandle user, String perm, int appOp,
+                                                BroadcastReceiver receiver) {
+        XposedHelpers.callMethod(context, "sendOrderedBroadcastAsUser", intent, user, perm,
+                appOp, receiver, XposedHelpers.callMethod(thisObject, "getHandler"), Activity.RESULT_OK, null, null);
+    }
+
+    @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
+    private static boolean isAllUser(UserHandle userHandle) {
+        final Object allUser = XposedHelpers.getStaticObjectField(UserHandle.class, "ALL");
+        return userHandle.equals(allUser);
+    }
+
+    private static void callSendBroadcast(Object thisObject, Context context, Intent intent, String perm, int appOp, BroadcastReceiver receiver) {
+        XposedHelpers.callMethod(context, "sendOrderedBroadcast", intent, perm,
+                appOp, receiver, XposedHelpers.callMethod(thisObject, "getHandler"), Activity.RESULT_OK, null, null);
+    }
+
+    @TargetApi(Build.VERSION_CODES.KITKAT)
+    private void hookDispatchIntent19(LoadPackageParam lpparam) {
+        String className = "com.android.internal.telephony.InboundSmsHandler";
+        String methodName = "dispatchIntent";
+        Class<?> param1Type = Intent.class;
+        Class<?> param2Type = String.class;
+        Class<?> param3Type = int.class;
+        Class<?> param4Type = BroadcastReceiver.class;
+
+        XposedHelpers.findAndHookMethod(className, lpparam.classLoader, methodName,
+                param1Type, param2Type, param3Type, param4Type, new DispatchIntentHook(3));
+    }
+
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+    private void hookDispatchIntent21(LoadPackageParam lpparam) {
+        String className = "com.android.internal.telephony.InboundSmsHandler";
+        String methodName = "dispatchIntent";
+        Class<?> param1Type = Intent.class;
+        Class<?> param2Type = String.class;
+        Class<?> param3Type = int.class;
+        Class<?> param4Type = BroadcastReceiver.class;
+        Class<?> param5Type = UserHandle.class;
+
+        XposedHelpers.findAndHookMethod(className, lpparam.classLoader, methodName,
+                param1Type, param2Type, param3Type, param4Type, param5Type, new DispatchIntentHook(3));
+    }
+
+    @TargetApi(Build.VERSION_CODES.M)
+    private void hookDispatchIntent23(LoadPackageParam lpparam) {
+        String className = "com.android.internal.telephony.InboundSmsHandler";
+        String methodName = "dispatchIntent";
+        Class<?> param1Type = Intent.class;
+        Class<?> param2Type = String.class;
+        Class<?> param3Type = int.class;
+        Class<?> param4Type = Bundle.class;
+        Class<?> param5Type = BroadcastReceiver.class;
+        Class<?> param6Type = UserHandle.class;
+
+        XposedHelpers.findAndHookMethod(className, lpparam.classLoader, methodName,
+                param1Type, param2Type, param3Type, param4Type, param5Type, param6Type, new DispatchIntentHook(4));
+    }
+
+    private void handlePhone(final LoadPackageParam lpparam) throws Throwable {
+        if (!lpparam.packageName.equals("com.android.phone"))
+            return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            hookDispatchIntent23(lpparam);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            hookDispatchIntent21(lpparam);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            hookDispatchIntent19(lpparam);
+        }
+    }
+
+    public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
+        handleSearch(lpparam);
+        handleCG(lpparam);
+        handlePhone(lpparam);
     }
 
 }
