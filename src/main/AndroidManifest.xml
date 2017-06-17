@@ -4,9 +4,27 @@
     android:versionCode="1"
     android:versionName="1.0">
 
-<application
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
         android:allowBackup="true"
         android:label="@string/app_name">
+
+        <activity android:name=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <receiver android:name=".AlarmReceiver">
+            <intent-filter>
+                <action android:name="android.app.action.NEXT_ALARM_CLOCK_CHANGED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="ru.shutoff.routeselect.ACTION" />
+            </intent-filter>
+        </receiver>
+
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
